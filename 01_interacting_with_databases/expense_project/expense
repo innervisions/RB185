@@ -1,27 +1,87 @@
 #! /usr/bin/env ruby
 require "pg"
+require "io/console"
 
 class ExpenseData
   def initialize
     @connection = PG.connect(dbname: "expenses")
+    setup_schema
+  end
+
+  def setup_schema
+    result = @connection.exec <<~SQL
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'expenses';
+              SQL
+    return unless result[0]["count"] == "0"
+    @connection.exec <<~SQL
+      CREATE TABLE expenses (
+      id serial PRIMARY KEY,
+      amount numeric(6,2) NOT NULL,
+      memo text NOT NULL,
+      created_on date NOT NULL
+      );
+    SQL
   end
 
   def list_expenses
     result = @connection.exec("SELECT * FROM expenses ORDER BY created_on ASC")
-    result.each do |tuple|
-      columns = [tuple["id"].rjust(3),
-                 tuple["created_on"].rjust(10),
-                 tuple["amount"].rjust(12),
-                 tuple["memo"]]
-
-      puts columns.join(" | ")
-    end
+    display_count(result)
+    display_expenses(result) unless result.values.empty?
   end
 
   def add_expense(amount, memo)
     date = Date.today
     sql = "INSERT INTO expenses (amount, memo, created_on) VALUES ($1, $2, $3)"
     @connection.exec_params(sql, [amount, memo, date])
+  end
+
+  def search_expenses(term)
+    sql = "SELECT * FROM expenses WHERE memo ILIKE $1"
+    result = @connection.exec_params(sql, ["%#{term}%"])
+    display_count(result)
+    display_expenses(result) unless result.values.empty?
+  end
+
+  def delete_expense(id)
+    sql = "SELECT * FROM expenses WHERE id = $1"
+    result = @connection.exec_params(sql, [id])
+    if result.values.empty?
+      puts "There is no expense with the id '#{id}'."
+    else
+      puts "The following expense has been deleted:"
+      display_expenses(result)
+      sql = "DELETE FROM expenses WHERE id = $1"
+      @connection.exec_params(sql, [id])
+    end
+  end
+
+  def delete_all_expenses
+    @connection.exec("DELETE FROM expenses")
+  end
+
+  private
+
+  def display_expenses(expenses)
+    total = 0
+    expenses.each do |tuple|
+      columns = [tuple["id"].rjust(3),
+                 tuple["created_on"].rjust(10),
+                 tuple["amount"].rjust(12),
+                 tuple["memo"]]
+      total += tuple["amount"].to_f
+      puts columns.join(" | ")
+    end
+    puts "-" * 50
+    puts "Total" + total.to_s.rjust(26)
+  end
+
+  def display_count(expenses)
+    if expenses.values.empty?
+      puts "There are no expenses."
+    else
+      puts "There are #{expenses.values.size} expenses."
+    end
   end
 end
 
@@ -54,6 +114,13 @@ class CLI
       @application.add_expense(amount, memo)
     when "list"
       @application.list_expenses
+    when "search"
+      @application.search_expenses(arguments.join(" "))
+    when "delete"
+      @application.delete_expense(arguments[0])
+    when "clear"
+      puts "This will remove all expenses. Are you sure? (y/n)"
+      @application.delete_all_expenses if $stdin.getch == 'y'
     else
       display_help
     end
